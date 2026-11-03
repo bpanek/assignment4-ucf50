@@ -119,7 +119,7 @@ class LRCN(nn.Module):
         # Process the first frame separately to initialize the LSTM hidden and cell states.
         idx = 0
         y = self.base_model(x[:, idx])
-        _, (hn, cn) = self.rnn(y.unsqueeze(1))
+        out, (hn, cn) = self.rnn(y.unsqueeze(1))
         
         # Iterate over the remaining frames, feeding each frame's features into the LSTM.
         for idx in range(1, ts):

@@ -15,6 +15,10 @@ from torch.nn.utils.rnn import pad_sequence
 
 from PIL import Image
 
+import re
+from collections import defaultdict
+from random import Random
+from pathlib import Path
 import os
 import glob
 from tqdm import tqdm
@@ -56,8 +60,11 @@ class VideoDataset(Dataset):
                    with T being the number of frames (up to fr_per_vid) and label is an integer.
         """
         # Get all JPEG frame paths from the video directory and select up to fr_per_vid frames
-        fr_paths = glob.glob(self.dataset[idx][0] + '/*.jpg')
-        fr_paths = fr_paths[:self.fpv]
+        clip_dir = Path(self.dataset[idx][0])
+        fr_paths = sorted(
+            clip_dir.glob("frame*.jpg"),
+            key=lambda path: int(path.stem.removeprefix("frame")),
+        )[:self.fpv]
         
         # Open images using PIL
         fr_imgs = [Image.open(fr_path) for fr_path in fr_paths]
@@ -102,47 +109,49 @@ def load_dataset(frame_dir):
     return vid_dataset, label_dict
 
 
+def collect_video_groups(vid_dataset):
+    """Collect UCF50 clips by class label and source group."""
+    groups_by_class = defaultdict(lambda: defaultdict(list))
+    for path, label in sorted(vid_dataset.items()):
+        match = re.search(r"_g(\d+)_c\d+$", os.path.basename(path))
+        if match is None:
+            raise ValueError(f"Expected a UCF50 clip directory, got {path!r}")
+        groups_by_class[label][int(match.group(1))].append((path, label))
+    return groups_by_class
+
+
+def split_class_groups(groups, tr_ratio, ts_ratio, rng):
+    """Assign one class's source groups to train, validation, and test."""
+    group_ids = sorted(groups)
+    rng.shuffle(group_ids)
+    count = len(group_ids)
+    train_count = round(count * tr_ratio)
+    test_count = round(count * ts_ratio)
+    val_end = count - test_count
+
+    if not 0 < train_count < val_end < count:
+        raise ValueError("Split ratios must leave groups in all three splits.")
+
+    return group_ids[:train_count], group_ids[train_count:val_end], group_ids[val_end:]
+
+
 def dataset_split(vid_dataset, tr_ratio, ts_ratio, seed=0):
-    """
-    Split the dataset into training, validation, and test sets using stratified sampling.
-    
-    This function uses StratifiedShuffleSplit to ensure that each split has a representative
-    distribution of classes.
-    
-    Args:
-        vid_dataset (dict): Dictionary mapping video paths to labels.
-        tr_ratio (float): Proportion of the data to use for training.
-        ts_ratio (float): Proportion of the data to use for testing.
-        seed (int, optional): Random seed for reproducibility. Default is 0.
-    
-    Returns:
-        tuple: (tr_dataset, val_dataset, ts_dataset)
-            - tr_dataset (list): List of (video_path, label) tuples for the training set.
-            - val_dataset (list): List of (video_path, label) tuples for the validation set.
-            - ts_dataset (list): List of (video_path, label) tuples for the test set.
-    """
-    vid_paths = np.array([vid_path for vid_path in vid_dataset.keys()])
-    vid_labels = np.array([vid_label for vid_label in vid_dataset.values()])
-    print('Splitting train/validation/test datasets....')
+    """Return train, validation, and test clip lists with disjoint groups."""
+    if not (tr_ratio > 0 and ts_ratio > 0 and tr_ratio + ts_ratio < 1):
+        raise ValueError("Train and test ratios must leave room for validation.")
 
-    # Test split using StratifiedShuffleSplit
-    ts_spliter = StratifiedShuffleSplit(n_splits=1, test_size=ts_ratio, random_state=seed)
-    for tr_val_idx, ts_idx in ts_spliter.split(vid_paths, vid_labels):
-        ts_paths, ts_labels = vid_paths[ts_idx], vid_labels[ts_idx]
-        tr_val_paths, tr_val_labels = vid_paths[tr_val_idx], vid_labels[tr_val_idx]
-    ts_dataset = [(ts_path, ts_label) for ts_path, ts_label in zip(ts_paths, ts_labels)]
+    groups_by_class = collect_video_groups(vid_dataset)
+    rng = Random(seed)
+    splits = ([], [], [])
 
-    # Train/validation split
-    val_ratio = 1 - tr_ratio - ts_ratio
-    val_wt = val_ratio / (tr_ratio + val_ratio)
-    val_spliter = StratifiedShuffleSplit(n_splits=1, test_size=val_wt, random_state=seed)
-    for tr_idx, val_idx in val_spliter.split(tr_val_paths, tr_val_labels):
-        tr_paths, tr_labels = tr_val_paths[tr_idx], tr_val_labels[tr_idx]
-        val_paths, val_labels = tr_val_paths[val_idx], tr_val_labels[val_idx]
-    tr_dataset = [(tr_path, tr_label) for tr_path, tr_label in zip(tr_paths, tr_labels)]
-    val_dataset = [(val_path, val_label) for val_path, val_label in zip(val_paths, val_labels)]
+    for label in sorted(groups_by_class):
+        groups = groups_by_class[label]
+        assignments = split_class_groups(groups, tr_ratio, ts_ratio, rng)
+        for split, group_ids in zip(splits, assignments):
+            for group_id in group_ids:
+                split.extend(groups[group_id])
 
-    return tr_dataset, val_dataset, ts_dataset
+    return splits
 
 
 def collate_fn_r3d_18(batch):
