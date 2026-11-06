@@ -19,7 +19,10 @@ import copy
 from tqdm import tqdm
 import torch
 
-def train(dataloaders, model, criterion, optimizer, scheduler, device, optim_model_wts_dir, n_epochs=30):
+def train(
+    dataloaders, model, criterion, optimizer, scheduler, device,
+    optim_model_wts_dir, n_epochs=30, wandb_run=None,
+):
     """
     Train and validate the model over a given number of epochs.
     
@@ -33,11 +36,14 @@ def train(dataloaders, model, criterion, optimizer, scheduler, device, optim_mod
         model (torch.nn.Module): The video classification model to be trained.
         criterion (callable): Loss function.
         optimizer (torch.optim.Optimizer): Optimizer for updating model weights.
-        scheduler (torch.optim.lr_scheduler): Learning rate scheduler, which adjusts the learning rate based on validation loss.
+        scheduler: Optional learning-rate scheduler stepped on validation loss.
+            Pass None to keep the learning rate fixed.
         device (torch.device): Device (CPU or GPU) on which to perform training.
         optim_model_wts_dir (str): Directory to save the best model weights.
         n_epochs (int, optional): Number of training epochs. Default is 30.
-
+        wandb_run: Optional Weights & Biases run for logging per-epoch
+            training and validation loss and accuracy.
+            
     Returns:
         tuple: (model, loss_hist, acc_hist)
             - model (torch.nn.Module): The trained model loaded with the best validation weights.
@@ -74,11 +80,22 @@ def train(dataloaders, model, criterion, optimizer, scheduler, device, optim_mod
         loss_hist['val'].append(val_loss)
         acc_hist['val'].append(val_accuracy)
 
+        if wandb_run is not None:
+            wandb_run.log({
+                "epoch": epoch + 1,
+                "train/loss": train_loss,
+                "train/accuracy_pct": 100 * train_accuracy,
+                "val/loss": val_loss,
+                "val/accuracy_pct": 100 * val_accuracy,
+                "learning_rate": current_lr,
+            }, step=epoch + 1)
+
         # Update learning rate based on validation loss
-        scheduler.step(val_loss)
-        if current_lr != get_learning_rate(optimizer):
-            print('Loading best model weights!')
-            model.load_state_dict(best_model_wts)
+        if scheduler is not None:
+            scheduler.step(val_loss)
+            if current_lr != get_learning_rate(optimizer):
+                print("Loading best model weights!")
+                model.load_state_dict(best_model_wts)
 
         print("train loss: {:.6f}, val loss: {:.6f}, accuracy: {:.2f}".format(train_loss, val_loss, 100*val_accuracy))
         print("-" * 60)
@@ -166,6 +183,9 @@ def get_epoch_loss(model, criterion, dataloader, device, optimizer=None):
         x_batch, y_batch = x_batch.to(device), y_batch.to(device)
         output = model(x_batch)
         batch_loss, n_batch_correct_preds = get_batch_loss(criterion, output, y_batch, optimizer)
+
+        if getattr(criterion, "reduction", "sum") == "mean":
+            batch_loss *= y_batch.numel()
 
         running_loss += batch_loss
         running_total_correct_preds += n_batch_correct_preds

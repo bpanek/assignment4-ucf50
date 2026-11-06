@@ -46,7 +46,7 @@ def get_frames(vid, n_frames=1):
         print("No frames found in video:", vid)
         v_cap.release()
         return frames, 0
-    frame_idx = np.linspace(0, v_len-1, n_frames+1, dtype=np.int16)
+    frame_idx = np.linspace(0, v_len - 1, num=min(n_frames, v_len), dtype=np.int64)
     for idx in range(v_len):
         success, frame = v_cap.read()
         if not success:

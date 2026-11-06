@@ -16,42 +16,33 @@ import torch
 from tqdm import tqdm
 from sklearn.metrics import classification_report, multilabel_confusion_matrix
 
-def test(model, dataloader, device):
-    """
-    Evaluate the model on the test dataset and compute overall accuracy.
-    
-    This function sets the model to evaluation mode and processes the test data
-    from the provided DataLoader. It computes predictions for each batch, counts the number
-    of correct predictions, and accumulates the true and predicted labels.
-    
-    Args:
-        model (torch.nn.Module): The trained video classification model.
-        dataloader (torch.utils.data.DataLoader): DataLoader containing the test dataset.
-        device (torch.device): The device (CPU or GPU) on which to perform evaluation.
-    
-    Returns:
-        tuple: (targets, outputs, accuracy)
-            - targets (list): Ground truth labels for all samples.
-            - outputs (list): Predicted labels for all samples.
-            - accuracy (float): Overall accuracy computed as the ratio of correct predictions
-                                to the total number of samples.
-    """
+@torch.no_grad()
+def test(model, dataloader, device, wandb_run=None):
+    """Return test labels, predictions, and accuracy, and optionally log metrics."""
     model.eval()
-    with torch.no_grad():
-        total_correct_preds = 0.0
-        len_dataset = len(dataloader.dataset)
-        targets, outputs = [], []
-        for x_batch, y_batch in tqdm(dataloader):
-            x_batch, y_batch = x_batch.to(device), y_batch.to(device)
-            output = model(x_batch)
-            pred = output.argmax(dim=1, keepdim=True)
-            correct_preds = pred.eq(y_batch.view_as(pred)).sum().item()
-            total_correct_preds += correct_preds
-            outputs.extend(pred.view(-1).detach().cpu().numpy().tolist())
-            targets.extend(y_batch.detach().cpu().numpy().tolist())
-        
-        accuracy = total_correct_preds / float(len_dataset)
-    
+    loss_function = torch.nn.CrossEntropyLoss(reduction="sum")
+    total_loss = 0.0
+    targets, outputs = [], []
+
+    for inputs, labels in tqdm(dataloader, desc="Testing"):
+        inputs, labels = inputs.to(device), labels.to(device)
+        logits = model(inputs)
+        total_loss += loss_function(logits, labels).item()
+        outputs.extend(logits.argmax(dim=1).cpu().tolist())
+        targets.extend(labels.cpu().tolist())
+
+    if not targets:
+        raise ValueError("The test loader returned no clips.")
+
+    correct = sum(prediction == target for prediction, target in zip(outputs, targets))
+    accuracy = correct / len(targets)
+    if wandb_run is not None:
+        wandb_run.log({
+            "test/loss": total_loss / len(targets),
+            "test/accuracy_pct": 100 * accuracy,
+            "test/correct": correct,
+            "test/clips": len(targets),
+        })
     return targets, outputs, accuracy
 
 def get_test_report(target, output, target_names):
